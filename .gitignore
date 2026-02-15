@@ -18,3 +18,6 @@ xcuserdata/
 # Video files (users should add their own)
 *.mp4
 *.mov
+
+# Local notes (not for publishing)
+Local/

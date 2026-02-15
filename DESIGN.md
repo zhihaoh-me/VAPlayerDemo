@@ -10,7 +10,7 @@ This project implements a custom MP4 video player for iOS that plays video witho
 - Custom MP4 box parsing (no ffmpeg)
 - Byte range reading pattern (simulating progressive download)
 
-**Test File**: `demo.mp4` (included in project)
+**Test File**: a non fragmented mp4 (included in project)
 
 ---
 
