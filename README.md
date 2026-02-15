@@ -16,12 +16,12 @@ Inspect each stage of the pipeline independently:
 
 | MP4 Box Parsing | Demuxer (Sample Table) | Frame Decoding |
 |:---:|:---:|:---:|
-| ![Box Parser](screenshots/debug_parser.png) | ![Demuxer](screenshots/debug_demux.png) | ![Decoder](screenshots/debug_decode.png) |
+| ![Box Parser](DemoAssets/debug_parser.png) | ![Demuxer](DemoAssets/debug_demux.png) | ![Decoder](DemoAssets/debug_decode.png) |
 | Visualizes the ISO BMFF box hierarchy | Shows extracted sample table with PTS, DTS, offsets | Decodes and displays individual frames |
 
 | Metal Rendering | Buffer Manager |
 |:---:|:---:|
-| ![Metal](screenshots/debug_metal.png) | ![Buffer](screenshots/debug_buffer.png) |
+| ![Metal](DemoAssets/debug_metal.png) | ![Buffer](DemoAssets/debug_buffer.png) |
 | Tests YUV→RGB shader on decoded frames | Tests dual-threshold buffer fill and drain |
 
 ### Player Tab
@@ -30,10 +30,9 @@ Full end-to-end playback with all stages working together:
 
 | Playback |
 |:---:|
-| ![Player](screenshots/player.png) |
+| ![Player](DemoAssets/player.png) |
 | Complete pipeline: demux → decode → buffer → render |
 
-> *Screenshots to be added — place images in the `screenshots/` folder.*
 
 ## Why
 
