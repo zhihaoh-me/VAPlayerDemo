@@ -29,10 +29,6 @@ final class VideoDecoder {
     /// NAL unit length size (typically 4 bytes)
     private var nalLengthSize: Int = 4
 
-    /// Queue for output frames (handles B-frame reordering)
-    private var outputFrames: [DecodedFrame] = []
-    private let outputLock = NSLock()
-
     /// Indicates if decoder is ready
     var isConfigured: Bool {
         decompressionSession != nil
@@ -146,7 +142,9 @@ final class VideoDecoder {
             throw VideoDecoderError.decodeFailed(sampleBufferStatus)
         }
 
-        // Decode the frame - output comes through callback and is queued
+        // Decode the frame synchronously — callback fires exactly once before
+        // VTDecompressionSessionDecodeFrame returns.
+        var decodedFrame: DecodedFrame?
         var infoFlags: VTDecodeInfoFlags = []
         let inputPTS = timingInfo.presentationTimeStamp
 
@@ -155,18 +153,14 @@ final class VideoDecoder {
             sampleBuffer: cmSampleBuffer,
             flags: [], // Synchronous decoding
             infoFlagsOut: &infoFlags
-        ) { [weak self] status, infoFlags, imageBuffer, pts, dts in
-            guard let self = self else { return }
+        ) { status, infoFlags, imageBuffer, pts, dts in
             if status == noErr, let buffer = imageBuffer {
-                let frame = DecodedFrame(
+                decodedFrame = DecodedFrame(
                     pixelBuffer: buffer,
                     presentationTime: pts,
                     decodeTime: dts
                 )
-                self.outputLock.lock()
-                self.outputFrames.append(frame)
-                self.outputLock.unlock()
-                Log.decoder.debug("output frame pts=\(pts.seconds) from input pts=\(inputPTS.seconds)")
+                Log.decoder.debug("output frame pts=\(pts.seconds) from input pts=\(inputPTS.seconds), input dts=\(timingInfo.decodeTimeStamp.seconds)")
             } else {
                 Log.decoder.warning("callback status=\(status), infoFlags=\(infoFlags.rawValue), hasBuffer=\(imageBuffer != nil)")
             }
@@ -176,59 +170,25 @@ final class VideoDecoder {
             throw VideoDecoderError.decodeFailed(decodeStatus)
         }
 
-        // Return the first available frame from the queue
-        return dequeueFrame()
+        return decodedFrame
     }
 
-    /// Dequeue a frame from the output queue
-    private func dequeueFrame() -> DecodedFrame? {
-        outputLock.lock()
-        defer { outputLock.unlock() }
-
-        guard !outputFrames.isEmpty else { return nil }
-        return outputFrames.removeFirst()
-    }
-
-    /// Get all remaining frames in the queue (call after finishDelayedFrames)
-    func drainFrames() -> [DecodedFrame] {
-        outputLock.lock()
-        defer { outputLock.unlock() }
-
-        let frames = outputFrames
-        outputFrames.removeAll()
-        return frames
-    }
-
-    /// Flush the decoder (call when seeking or stopping)
+    /// Wait for any in-flight asynchronous frames to complete.
     func flush() {
         if let session = decompressionSession {
             VTDecompressionSessionWaitForAsynchronousFrames(session)
         }
     }
 
-    /// Finish decoding and signal end of stream (call at end of stream)
-    /// VideoToolbox may hold B-frames for reordering - this forces them out
-    func finishDelayedFrames() {
+    /// Signal end of stream to VideoToolbox.
+    /// With synchronous decoding, VT doesn't hold frames — each decode call
+    /// returns its output immediately via the inline callback. This is kept
+    /// as a formality to properly close out the session.
+    func finishDecoding() {
         guard let session = decompressionSession else { return }
-
-        outputLock.lock()
-        let countBefore = outputFrames.count
-        outputLock.unlock()
-
-        Log.decoder.info("finishDelayedFrames called, queue has \(countBefore) frames")
-
-        // Tell VideoToolbox no more frames are coming
-        let status = VTDecompressionSessionFinishDelayedFrames(session)
-        Log.decoder.info("FinishDelayedFrames returned \(status)")
-
-        // Wait for any remaining async frames
+        VTDecompressionSessionFinishDelayedFrames(session)
         VTDecompressionSessionWaitForAsynchronousFrames(session)
-
-        outputLock.lock()
-        let countAfter = outputFrames.count
-        outputLock.unlock()
-
-        Log.decoder.info("after finish, queue has \(countAfter) frames (added \(countAfter - countBefore))")
+        Log.decoder.info("finishDecoding: session flushed")
     }
 
     /// Invalidate and release resources

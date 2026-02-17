@@ -19,5 +19,8 @@ xcuserdata/
 *.mp4
 *.mov
 
+# Exception: include test video
+!**/Big_Buck_Bunny_720_10s_2MB.mp4
+
 # Local notes (not for publishing)
 Local/
