@@ -12,7 +12,7 @@ import AVFoundation
 
 // MARK: - Video File Configuration
 /// Change these values to swap the video file used throughout the app.
-private let videoFileName = "pin_demo"
+private let videoFileName = "Big_Buck_Bunny_720_10s_2MB"
 private let videoFileExtension = "mp4"
 
 struct ContentView: View {
