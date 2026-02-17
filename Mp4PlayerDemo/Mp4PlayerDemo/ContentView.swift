@@ -8,6 +8,7 @@
 import SwiftUI
 import CoreMedia
 import CoreVideo
+import AVFoundation
 
 // MARK: - Video File Configuration
 /// Change these values to swap the video file used throughout the app.
@@ -25,6 +26,11 @@ struct ContentView: View {
             PlayerDemoView()
                 .tabItem {
                     Label("Player", systemImage: "play.circle")
+                }
+
+            SampleBufferPlayerDemoView()
+                .tabItem {
+                    Label("SB Player", systemImage: "play.rectangle")
                 }
         }
     }
@@ -208,6 +214,111 @@ struct PlayerDemoView: View {
     private func replay() {
         engine.stop()
         loadAndPlay()
+    }
+}
+
+// MARK: - SampleBuffer Player Demo View (Milestone 1)
+
+struct SampleBufferPlayerDemoView: View {
+    @StateObject private var engine = SampleBufferPlayerEngine()
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(spacing: 16) {
+            // Video display area
+            ZStack {
+                Color.black
+
+                if isLoading {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .scaleEffect(1.5)
+                } else if engine.state == .idle && engine.videoSize == .zero {
+                    VStack(spacing: 12) {
+                        Image(systemName: "play.rectangle")
+                            .font(.system(size: 60))
+                            .foregroundColor(.white.opacity(0.6))
+                        Text("Tap Load to start")
+                            .foregroundColor(.white.opacity(0.6))
+                    }
+                }
+
+                SampleBufferPlayerView(displayLayer: engine.displayLayer)
+            }
+            .aspectRatio(videoAspectRatio, contentMode: .fit)
+            .cornerRadius(8)
+            .padding()
+
+            // Controls
+            Button(action: { load() }) {
+                HStack {
+                    Image(systemName: "square.and.arrow.down")
+                    Text("Load")
+                }
+                .frame(minWidth: 100)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isLoading || engine.videoSize != .zero)
+
+            // Status info
+            VStack(spacing: 4) {
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if engine.videoSize != .zero {
+                    Text("\(Int(engine.videoSize.width))x\(Int(engine.videoSize.height)) | \(formatTime(engine.duration.seconds))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            if let error = errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .padding(.horizontal)
+            }
+
+            Spacer()
+        }
+    }
+
+    private var videoAspectRatio: CGFloat {
+        guard engine.videoSize.height > 0 else { return 16/9 }
+        return engine.videoSize.width / engine.videoSize.height
+    }
+
+    private var statusText: String {
+        if isLoading { return "Loading..." }
+        if engine.videoSize != .zero { return "Loaded — ready for playback" }
+        return "Ready"
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite && seconds >= 0 else { return "0:00" }
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", mins, secs)
+    }
+
+    private func load() {
+        isLoading = true
+        errorMessage = nil
+
+        Task {
+            do {
+                guard let url = Bundle.main.url(forResource: videoFileName, withExtension: videoFileExtension) else {
+                    throw VideoPlayerError.noVideoTrack
+                }
+                try await engine.load(url: url)
+                isLoading = false
+            } catch {
+                errorMessage = "Error: \(error.localizedDescription)"
+                isLoading = false
+            }
+        }
     }
 }
 

@@ -16,4 +16,5 @@ struct Log {
     static let buffer = Logger(subsystem: subsystem, category: "Buffer")
     static let renderer = Logger(subsystem: subsystem, category: "Renderer")
     static let demuxer = Logger(subsystem: subsystem, category: "Demuxer")
+    static let synchronizer = Logger(subsystem: subsystem, category: "Synchronizer")
 }
