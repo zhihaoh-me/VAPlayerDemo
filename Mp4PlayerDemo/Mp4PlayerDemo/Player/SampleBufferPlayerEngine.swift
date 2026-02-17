@@ -18,6 +18,7 @@ class SampleBufferPlayerEngine: ObservableObject {
     @Published private(set) var currentTime: CMTime = .zero
     @Published private(set) var duration: CMTime = .zero
     @Published private(set) var videoSize: CGSize = .zero
+    @Published private(set) var error: Error?
 
     /// The display layer for the view to host.
     let displayLayer = AVSampleBufferDisplayLayer()
@@ -32,15 +33,20 @@ class SampleBufferPlayerEngine: ObservableObject {
         displayLayer.sampleBufferRenderer
     }
 
-    // MARK: - Feeding State
+    // MARK: - Feeding State (accessed only on feedingQueue)
 
     private let feedingQueue = DispatchQueue(label: "com.mp4player.sampleBufferFeeding")
     private var timescale: Int32 = 0
     private var rendererAdded = false
 
+    private var reorderBuffer: ReorderBuffer?
+    private var nextPTS: CMTime = .zero
+    private var frameDuration: CMTime = .zero
+
     // MARK: - Time Observation
 
     private var timeObserver: Any?
+    private var statusObservation: NSKeyValueObservation?
 
     // MARK: - Warmup
 
@@ -50,6 +56,9 @@ class SampleBufferPlayerEngine: ObservableObject {
         stop()
         state = .idle
         currentTime = .zero
+        error = nil
+
+        Log.synchronizer.info("Warmup started for \(url.lastPathComponent)")
 
         // Parse
         let reader = try FileByteRangeReader(url: url)
@@ -70,25 +79,31 @@ class SampleBufferPlayerEngine: ObservableObject {
         try decoder.configure()
         self.decoder = decoder
 
+        Log.synchronizer.info("Decoder configured: \(trackInfo.codecType.string)")
+
         // Wire renderer into synchronizer (once)
         if !rendererAdded {
             synchronizer.addRenderer(renderer)
             rendererAdded = true
+            Log.synchronizer.info("Renderer added to synchronizer")
         }
+
+        // Observe renderer status for failures
+        observeRendererStatus()
+
+        // Reset feed state
+        nextPTS = .zero
+        frameDuration = demuxer.sampleCount > 0
+            ? CMTime(value: Int64(trackInfo.duration) / Int64(demuxer.sampleCount), timescale: self.timescale)
+            : CMTime(value: 1, timescale: self.timescale)
+        reorderBuffer = ReorderBuffer(demuxer: demuxer, decoder: decoder, sampleCount: demuxer.sampleCount)
 
         // Start feeding at rate 0 — renderer pulls frames into its buffer
         // but synchronizer clock is stopped so nothing displays.
-        let feedState = FeedState(
-            demuxer: demuxer,
-            decoder: decoder,
-            sampleCount: demuxer.sampleCount,
-            timescale: timescale
-        )
-
         let r = renderer
         r.requestMediaDataWhenReady(on: feedingQueue) { [weak self] in
             guard let self else { return }
-            self.feedLoop(renderer: r, state: feedState)
+            self.feedLoop(renderer: r)
         }
 
         state = .buffering  // "warmed up / ready to play"
@@ -105,6 +120,14 @@ class SampleBufferPlayerEngine: ObservableObject {
     func play() {
         guard state == .buffering else {
             Log.synchronizer.warning("play() called in state \(String(describing: self.state))")
+            return
+        }
+
+        // Check renderer health before starting
+        if renderer.status == .failed {
+            let err = renderer.error
+            Log.synchronizer.error("Renderer in failed state before play: \(String(describing: err))")
+            self.error = err
             return
         }
 
@@ -125,12 +148,16 @@ class SampleBufferPlayerEngine: ObservableObject {
     /// Stop playback and reset to idle.
     func stop() {
         removeTimeObserver()
+        statusObservation?.invalidate()
+        statusObservation = nil
         renderer.stopRequestingMediaData()
         synchronizer.setRate(0.0, time: .zero)
         renderer.flush()
+        reorderBuffer?.clear()
 
         state = .idle
         currentTime = .zero
+        Log.synchronizer.info("Stopped and reset")
     }
 
     // MARK: - Time Observer
@@ -164,74 +191,56 @@ class SampleBufferPlayerEngine: ObservableObject {
         }
     }
 
-    // MARK: - Feed State (only accessed on feedingQueue)
+    // MARK: - Renderer Status Observation
 
-    private final class FeedState: @unchecked Sendable {
-        let demuxer: MP4Demuxer
-        let decoder: VideoDecoder
-        let sampleCount: Int
-        let timescale: Int32
-        var nextIndex: Int = 0
-
-        init(demuxer: MP4Demuxer, decoder: VideoDecoder, sampleCount: Int, timescale: Int32) {
-            self.demuxer = demuxer
-            self.decoder = decoder
-            self.sampleCount = sampleCount
-            self.timescale = timescale
+    private func observeRendererStatus() {
+        statusObservation?.invalidate()
+        statusObservation = renderer.observe(\.status, options: [.new]) { [weak self] renderer, _ in
+            guard renderer.status == .failed else { return }
+            let err = renderer.error
+            Log.synchronizer.error("Renderer failed: \(String(describing: err))")
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.error = err
+                if self.state == .playing {
+                    self.synchronizer.setRate(0.0, time: self.synchronizer.currentTime())
+                    self.state = .ended
+                    self.removeTimeObserver()
+                }
+            }
         }
     }
 
     // MARK: - Feeding Loop (runs on feedingQueue)
 
-    private func feedLoop(renderer: AVSampleBufferVideoRenderer, state: FeedState) {
+    private func feedLoop(renderer: AVSampleBufferVideoRenderer) {
+        guard let reorderBuffer else { return }
+
         while renderer.isReadyForMoreMediaData {
-            let index = state.nextIndex
-            state.nextIndex += 1
-
-            guard index < state.sampleCount else {
-                finishFeeding(renderer: renderer, state: state)
-                return
+            // Ask the reorder buffer for the next frame at the expected PTS.
+            // It will decode samples as needed internally.
+            if let frame = reorderBuffer.nextFrame(pts: nextPTS) {
+                if let cmSample = wrapPixelBuffer(frame.pixelBuffer,
+                                                   pts: frame.presentationTime,
+                                                   duration: frameDuration) {
+                    renderer.enqueue(cmSample)
+                }
+                nextPTS = nextPTS + frameDuration
+                continue
             }
 
-            if let cmSample = decodeAndWrap(index: index, state: state) {
-                renderer.enqueue(cmSample)
+            // No frame returned — end of stream. Flush any remaining frames.
+            for frame in reorderBuffer.drainAll() {
+                if let cmSample = wrapPixelBuffer(frame.pixelBuffer,
+                                                   pts: frame.presentationTime,
+                                                   duration: frameDuration) {
+                    renderer.enqueue(cmSample)
+                }
             }
+            renderer.stopRequestingMediaData()
+            Log.synchronizer.info("Feeding complete")
+            return
         }
-    }
-
-    private func decodeAndWrap(index: Int, state: FeedState) -> CMSampleBuffer? {
-        guard let sample = state.demuxer.getSample(at: index) else {
-            Log.synchronizer.error("Failed to get sample at \(index)")
-            return nil
-        }
-
-        do {
-            let sampleData = try state.demuxer.readSample(at: index)
-            if let decoded = try state.decoder.decode(sampleData: sampleData, sample: sample) {
-                return wrapPixelBuffer(decoded.pixelBuffer,
-                                       pts: decoded.presentationTime,
-                                       duration: CMTime(value: Int64(sample.duration), timescale: state.timescale))
-            }
-        } catch {
-            Log.synchronizer.error("Decode error at sample \(index): \(error)")
-        }
-        return nil
-    }
-
-    private func finishFeeding(renderer: AVSampleBufferVideoRenderer, state: FeedState) {
-        state.decoder.finishDelayedFrames()
-        let remaining = state.decoder.drainFrames()
-
-        for frame in remaining {
-            if let cmSample = wrapPixelBuffer(frame.pixelBuffer,
-                                               pts: frame.presentationTime,
-                                               duration: CMTime(value: 1, timescale: state.timescale)) {
-                renderer.enqueue(cmSample)
-            }
-        }
-
-        renderer.stopRequestingMediaData()
-        Log.synchronizer.info("Feeding complete, drained \(remaining.count) delayed frames")
     }
 
     // MARK: - Helpers

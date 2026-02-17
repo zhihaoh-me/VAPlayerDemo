@@ -69,25 +69,13 @@ final class BufferManager {
         // Fill until we reach target or run out of samples
         while await !frameBuffer.isBufferFull(currentTime: currentTime) {
             guard nextSampleIndex < totalSamples else {
-                // Flush any delayed frames from decoder (B-frame reordering)
+                // Signal end of stream to decoder
                 decoder.flush()
-                decoder.finishDelayedFrames()
-
-                // Drain any remaining frames from decoder's output queue
-                let remainingFrames = decoder.drainFrames()
-                for frame in remainingFrames {
-                    let bufferedFrame = BufferedFrame(
-                        pixelBuffer: frame.pixelBuffer,
-                        presentationTime: frame.presentationTime,
-                        decodeTime: frame.decodeTime,
-                        sampleIndex: -1 // Unknown sample index for delayed frames
-                    )
-                    await frameBuffer.enqueue(bufferedFrame)
-                }
+                decoder.finishDecoding()
 
                 isEndOfStream = true
                 state = .endOfStream
-                Log.buffer.info("End of stream reached, drained \(remainingFrames.count) delayed frames")
+                Log.buffer.info("End of stream reached")
                 break
             }
 

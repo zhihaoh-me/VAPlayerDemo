@@ -12,7 +12,7 @@ import AVFoundation
 
 // MARK: - Video File Configuration
 /// Change these values to swap the video file used throughout the app.
-private let videoFileName = "Big_Buck_Bunny_720_10s_2MB"
+private let videoFileName = "pin_demo"
 private let videoFileExtension = "mp4"
 
 struct ContentView: View {
@@ -330,7 +330,7 @@ struct SampleBufferPlayerDemoView: View {
                 .foregroundColor(.secondary)
                 .padding(.bottom)
 
-            if let error = errorMessage {
+            if let error = errorMessage ?? engine.error.map({ "Renderer error: \($0.localizedDescription)" }) {
                 Text(error)
                     .font(.caption)
                     .foregroundColor(.red)
@@ -367,6 +367,7 @@ struct SampleBufferPlayerDemoView: View {
     }
 
     private var statusText: String {
+        if engine.error != nil { return "Error" }
         switch engine.state {
         case .idle: return isWarmedUp ? "Warmed up — ready to play" : "Ready"
         case .buffering: return "Paused"
