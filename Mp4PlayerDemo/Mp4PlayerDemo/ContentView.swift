@@ -217,7 +217,7 @@ struct PlayerDemoView: View {
     }
 }
 
-// MARK: - SampleBuffer Player Demo View (Milestone 1)
+// MARK: - SampleBuffer Player Demo View
 
 struct SampleBufferPlayerDemoView: View {
     @StateObject private var engine = SampleBufferPlayerEngine()
@@ -230,6 +230,9 @@ struct SampleBufferPlayerDemoView: View {
             ZStack {
                 Color.black
 
+                // Display layer — behind overlays, in front of black bg
+                SampleBufferPlayerView(displayLayer: engine.displayLayer)
+
                 if isLoading {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
@@ -239,27 +242,41 @@ struct SampleBufferPlayerDemoView: View {
                         Image(systemName: "play.rectangle")
                             .font(.system(size: 60))
                             .foregroundColor(.white.opacity(0.6))
-                        Text("Tap Load to start")
+                        Text("Tap Play to start")
                             .foregroundColor(.white.opacity(0.6))
                     }
                 }
 
-                SampleBufferPlayerView(displayLayer: engine.displayLayer)
+                if engine.state == .ended {
+                    VStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 50))
+                            .foregroundColor(.green)
+                        Text("Playback Complete")
+                            .foregroundColor(.white)
+                            .font(.headline)
+                    }
+                    .padding()
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(12)
+                }
             }
             .aspectRatio(videoAspectRatio, contentMode: .fit)
             .cornerRadius(8)
             .padding()
 
             // Controls
-            Button(action: { load() }) {
-                HStack {
-                    Image(systemName: "square.and.arrow.down")
-                    Text("Load")
+            HStack(spacing: 20) {
+                Button(action: { loadAndPlay() }) {
+                    HStack {
+                        Image(systemName: engine.state == .playing ? "stop.fill" : "play.fill")
+                        Text(engine.state == .playing ? "Stop" : "Play")
+                    }
+                    .frame(minWidth: 100)
                 }
-                .frame(minWidth: 100)
+                .buttonStyle(.borderedProminent)
+                .disabled(isLoading)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(isLoading || engine.videoSize != .zero)
 
             // Status info
             VStack(spacing: 4) {
@@ -291,9 +308,16 @@ struct SampleBufferPlayerDemoView: View {
     }
 
     private var statusText: String {
-        if isLoading { return "Loading..." }
-        if engine.videoSize != .zero { return "Loaded — ready for playback" }
-        return "Ready"
+        switch engine.state {
+        case .idle:
+            return isLoading ? "Loading..." : "Ready"
+        case .buffering:
+            return "Buffering..."
+        case .playing:
+            return "Playing"
+        case .ended:
+            return "Finished"
+        }
     }
 
     private func formatTime(_ seconds: Double) -> String {
@@ -303,21 +327,25 @@ struct SampleBufferPlayerDemoView: View {
         return String(format: "%d:%02d", mins, secs)
     }
 
-    private func load() {
+    private func loadAndPlay() {
+        if engine.state == .playing {
+            engine.stop()
+            return
+        }
+
         isLoading = true
         errorMessage = nil
 
-        Task {
-            do {
-                guard let url = Bundle.main.url(forResource: videoFileName, withExtension: videoFileExtension) else {
-                    throw VideoPlayerError.noVideoTrack
-                }
-                try await engine.load(url: url)
-                isLoading = false
-            } catch {
-                errorMessage = "Error: \(error.localizedDescription)"
-                isLoading = false
+        do {
+            guard let url = Bundle.main.url(forResource: videoFileName, withExtension: videoFileExtension) else {
+                throw VideoPlayerError.noVideoTrack
             }
+            try engine.load(url: url)
+            isLoading = false
+            engine.play()
+        } catch {
+            errorMessage = "Error: \(error.localizedDescription)"
+            isLoading = false
         }
     }
 }

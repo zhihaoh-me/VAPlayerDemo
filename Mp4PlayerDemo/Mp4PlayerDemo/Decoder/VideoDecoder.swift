@@ -166,7 +166,7 @@ final class VideoDecoder {
                 self.outputLock.lock()
                 self.outputFrames.append(frame)
                 self.outputLock.unlock()
-                Log.decoder.debug("output frame pts=\(pts.seconds) from input pts=\(inputPTS.seconds)")
+                Log.decoder.debug("output frame pts=\(pts.seconds) from input pts=\(inputPTS.seconds), input dts=\(timingInfo.decodeTimeStamp.seconds)")
             } else {
                 Log.decoder.warning("callback status=\(status), infoFlags=\(infoFlags.rawValue), hasBuffer=\(imageBuffer != nil)")
             }

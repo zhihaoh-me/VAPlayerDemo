@@ -8,7 +8,7 @@
 import Foundation
 import os.log
 
-struct Log {
+enum Log {
     private static let subsystem = Bundle.main.bundleIdentifier ?? "altas.Mp4PlayerDemo"
 
     static let player = Logger(subsystem: subsystem, category: "Player")
