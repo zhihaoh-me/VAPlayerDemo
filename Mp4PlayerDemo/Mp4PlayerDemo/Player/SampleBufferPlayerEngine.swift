@@ -8,8 +8,9 @@ import os
 /// Video player engine using AVSampleBufferRenderSynchronizer + AVSampleBufferDisplayLayer.
 /// Requires iOS 17+.
 ///
-/// `load`, `play`, `stop` are called from the main thread by SwiftUI.
-/// The feeding loop runs on `feedingQueue`.
+/// Flow: `warmup()` → `play()` → `pause()` → `play()` → ... → ended
+/// `warmup` loads, decodes, and enqueues all frames into the renderer at rate 0.
+/// `play` just starts the synchronizer clock.
 class SampleBufferPlayerEngine: ObservableObject {
     // MARK: - Published State (set only on main thread)
 
@@ -37,13 +38,20 @@ class SampleBufferPlayerEngine: ObservableObject {
     private var timescale: Int32 = 0
     private var rendererAdded = false
 
-    // MARK: - Load
+    // MARK: - Time Observation
 
-    func load(url: URL) throws {
+    private var timeObserver: Any?
+
+    // MARK: - Warmup
+
+    /// Load, decode, and enqueue all frames into the renderer without starting playback.
+    /// The synchronizer stays at rate 0 — no video is displayed until `play()`.
+    func warmup(url: URL) throws {
         stop()
         state = .idle
         currentTime = .zero
 
+        // Parse
         let reader = try FileByteRangeReader(url: url)
         let demuxer = MP4Demuxer(reader: reader)
         try demuxer.parse()
@@ -57,32 +65,19 @@ class SampleBufferPlayerEngine: ObservableObject {
         self.duration = CMTime(value: Int64(trackInfo.duration), timescale: self.timescale)
         self.videoSize = CGSize(width: CGFloat(trackInfo.width), height: CGFloat(trackInfo.height))
 
+        // Configure decoder
         let decoder = VideoDecoder(trackInfo: trackInfo)
         try decoder.configure()
         self.decoder = decoder
 
+        // Wire renderer into synchronizer (once)
         if !rendererAdded {
             synchronizer.addRenderer(renderer)
             rendererAdded = true
         }
 
-        let dims = "\(trackInfo.width)x\(trackInfo.height)"
-        let dur = duration.seconds
-        let samples = demuxer.sampleCount
-        Log.synchronizer.info("Loaded video: \(dims), duration=\(dur)s, samples=\(samples)")
-    }
-
-    // MARK: - Playback
-
-    func play() {
-        guard state != .playing,
-              let demuxer, let decoder else {
-            Log.synchronizer.warning("play() called but not ready")
-            return
-        }
-
-        state = .playing
-
+        // Start feeding at rate 0 — renderer pulls frames into its buffer
+        // but synchronizer clock is stopped so nothing displays.
         let feedState = FeedState(
             demuxer: demuxer,
             decoder: decoder,
@@ -96,17 +91,77 @@ class SampleBufferPlayerEngine: ObservableObject {
             self.feedLoop(renderer: r, state: feedState)
         }
 
-        synchronizer.setRate(1.0, time: .zero)
-        Log.synchronizer.info("Playback started")
+        state = .buffering  // "warmed up / ready to play"
+
+        let dims = "\(trackInfo.width)x\(trackInfo.height)"
+        let dur = duration.seconds
+        let samples = demuxer.sampleCount
+        Log.synchronizer.info("Warmup: \(dims), duration=\(dur)s, samples=\(samples)")
     }
 
+    // MARK: - Playback
+
+    /// Start or resume playback. Requires `warmup()` first.
+    func play() {
+        guard state == .buffering else {
+            Log.synchronizer.warning("play() called in state \(String(describing: self.state))")
+            return
+        }
+
+        synchronizer.setRate(1.0, time: synchronizer.currentTime())
+        state = .playing
+        addTimeObserver()
+        Log.synchronizer.info("Playing from \(self.currentTime.seconds)s")
+    }
+
+    /// Pause playback (freezes video, can resume with `play()`).
+    func pause() {
+        guard state == .playing else { return }
+        synchronizer.setRate(0.0, time: synchronizer.currentTime())
+        state = .buffering
+        Log.synchronizer.info("Paused at \(self.currentTime.seconds)s")
+    }
+
+    /// Stop playback and reset to idle.
     func stop() {
+        removeTimeObserver()
         renderer.stopRequestingMediaData()
         synchronizer.setRate(0.0, time: .zero)
         renderer.flush()
 
         state = .idle
         currentTime = .zero
+    }
+
+    // MARK: - Time Observer
+
+    private func addTimeObserver() {
+        guard timeObserver == nil else { return }
+
+        let interval = CMTime(seconds: 0.05, preferredTimescale: 600)
+        let dur = duration
+
+        timeObserver = synchronizer.addPeriodicTimeObserver(
+            forInterval: interval,
+            queue: .main
+        ) { [weak self] time in
+            guard let self else { return }
+            self.currentTime = time
+
+            if self.state == .playing && time >= dur {
+                self.state = .ended
+                self.synchronizer.setRate(0.0, time: time)
+                self.removeTimeObserver()
+                Log.synchronizer.info("Playback reached end at \(time.seconds)s")
+            }
+        }
+    }
+
+    private func removeTimeObserver() {
+        if let observer = timeObserver {
+            synchronizer.removeTimeObserver(observer)
+            timeObserver = nil
+        }
     }
 
     // MARK: - Feed State (only accessed on feedingQueue)
@@ -140,13 +195,8 @@ class SampleBufferPlayerEngine: ObservableObject {
 
             if let cmSample = decodeAndWrap(index: index, state: state) {
                 renderer.enqueue(cmSample)
-                if index < 3 {
-                    let pts = CMSampleBufferGetPresentationTimeStamp(cmSample).seconds
-                    Log.synchronizer.info("Enqueued sample \(index), pts=\(pts)s, rendererStatus=\(renderer.status.rawValue)")
-                }
             }
         }
-        Log.synchronizer.info("feedLoop paused, fed \(state.nextIndex) samples so far")
     }
 
     private func decodeAndWrap(index: Int, state: FeedState) -> CMSampleBuffer? {
@@ -182,10 +232,6 @@ class SampleBufferPlayerEngine: ObservableObject {
 
         renderer.stopRequestingMediaData()
         Log.synchronizer.info("Feeding complete, drained \(remaining.count) delayed frames")
-
-        DispatchQueue.main.async { [weak self] in
-            self?.state = .ended
-        }
     }
 
     // MARK: - Helpers

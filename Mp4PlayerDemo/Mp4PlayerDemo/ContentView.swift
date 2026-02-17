@@ -221,28 +221,23 @@ struct PlayerDemoView: View {
 
 struct SampleBufferPlayerDemoView: View {
     @StateObject private var engine = SampleBufferPlayerEngine()
-    @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var isWarmedUp = false
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 0) {
             // Video display area
             ZStack {
                 Color.black
 
-                // Display layer — behind overlays, in front of black bg
                 SampleBufferPlayerView(displayLayer: engine.displayLayer)
 
-                if isLoading {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        .scaleEffect(1.5)
-                } else if engine.state == .idle && engine.videoSize == .zero {
+                if engine.state == .idle && !isWarmedUp {
                     VStack(spacing: 12) {
                         Image(systemName: "play.rectangle")
                             .font(.system(size: 60))
                             .foregroundColor(.white.opacity(0.6))
-                        Text("Tap Play to start")
+                        Text("Tap Warmup to prepare")
                             .foregroundColor(.white.opacity(0.6))
                     }
                 }
@@ -265,31 +260,75 @@ struct SampleBufferPlayerDemoView: View {
             .cornerRadius(8)
             .padding()
 
+            // Progress bar
+            VStack(spacing: 4) {
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.3))
+                            .frame(height: 4)
+
+                        Rectangle()
+                            .fill(Color.blue)
+                            .frame(width: geometry.size.width * progress, height: 4)
+                    }
+                    .cornerRadius(2)
+                }
+                .frame(height: 4)
+
+                HStack {
+                    Text(formatTime(engine.currentTime.seconds))
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(formatTime(engine.duration.seconds))
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal)
+
             // Controls
-            HStack(spacing: 20) {
-                Button(action: { loadAndPlay() }) {
+            HStack(spacing: 12) {
+                // Warmup button
+                Button(action: { warmup() }) {
                     HStack {
-                        Image(systemName: engine.state == .playing ? "stop.fill" : "play.fill")
-                        Text(engine.state == .playing ? "Stop" : "Play")
+                        Image(systemName: "bolt")
+                        Text("Warmup")
+                    }
+                    .frame(minWidth: 100)
+                }
+                .buttonStyle(.bordered)
+                .disabled(isWarmedUp)
+
+                // Play / Pause button
+                Button(action: { togglePlayPause() }) {
+                    HStack {
+                        Image(systemName: playButtonIcon)
+                        Text(playButtonLabel)
                     }
                     .frame(minWidth: 100)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isLoading)
-            }
+                .disabled(!isWarmedUp)
 
-            // Status info
-            VStack(spacing: 4) {
-                Text(statusText)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                if engine.videoSize != .zero {
-                    Text("\(Int(engine.videoSize.width))x\(Int(engine.videoSize.height)) | \(formatTime(engine.duration.seconds))")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                if engine.state == .ended {
+                    Button(action: { replay() }) {
+                        HStack {
+                            Image(systemName: "arrow.counterclockwise")
+                            Text("Replay")
+                        }
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
+            .padding()
+
+            // Status
+            Text(statusText)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.bottom)
 
             if let error = errorMessage {
                 Text(error)
@@ -302,51 +341,80 @@ struct SampleBufferPlayerDemoView: View {
         }
     }
 
+    private var progress: CGFloat {
+        guard engine.duration.seconds > 0 else { return 0 }
+        return CGFloat(engine.currentTime.seconds / engine.duration.seconds)
+    }
+
     private var videoAspectRatio: CGFloat {
         guard engine.videoSize.height > 0 else { return 16/9 }
         return engine.videoSize.width / engine.videoSize.height
     }
 
+    private var playButtonIcon: String {
+        switch engine.state {
+        case .playing: return "pause.fill"
+        default: return "play.fill"
+        }
+    }
+
+    private var playButtonLabel: String {
+        switch engine.state {
+        case .playing: return "Pause"
+        case .buffering: return "Resume"
+        default: return "Play"
+        }
+    }
+
     private var statusText: String {
         switch engine.state {
-        case .idle:
-            return isLoading ? "Loading..." : "Ready"
-        case .buffering:
-            return "Buffering..."
-        case .playing:
-            return "Playing"
-        case .ended:
-            return "Finished"
+        case .idle: return isWarmedUp ? "Warmed up — ready to play" : "Ready"
+        case .buffering: return "Paused"
+        case .playing: return "Playing"
+        case .ended: return "Finished"
         }
     }
 
     private func formatTime(_ seconds: Double) -> String {
-        guard seconds.isFinite && seconds >= 0 else { return "0:00" }
+        guard seconds.isFinite && seconds >= 0 else { return "0:00.000" }
         let mins = Int(seconds) / 60
         let secs = Int(seconds) % 60
-        return String(format: "%d:%02d", mins, secs)
+        let ms = Int((seconds.truncatingRemainder(dividingBy: 1)) * 1000)
+        return String(format: "%d:%02d.%03d", mins, secs, ms)
     }
 
-    private func loadAndPlay() {
-        if engine.state == .playing {
-            engine.stop()
-            return
-        }
-
-        isLoading = true
+    private func warmup() {
         errorMessage = nil
-
         do {
             guard let url = Bundle.main.url(forResource: videoFileName, withExtension: videoFileExtension) else {
                 throw VideoPlayerError.noVideoTrack
             }
-            try engine.load(url: url)
-            isLoading = false
-            engine.play()
+            try engine.warmup(url: url)
+            isWarmedUp = true
         } catch {
             errorMessage = "Error: \(error.localizedDescription)"
-            isLoading = false
         }
+    }
+
+    private func togglePlayPause() {
+        errorMessage = nil
+
+        switch engine.state {
+        case .idle, .ended:
+            if !isWarmedUp { warmup() }
+            engine.play()
+        case .playing:
+            engine.pause()
+        case .buffering:
+            engine.play()
+        }
+    }
+
+    private func replay() {
+        engine.stop()
+        isWarmedUp = false
+        warmup()
+        engine.play()
     }
 }
 
